@@ -8,13 +8,14 @@ import (
 	"os"
 
 	"github.com/ezz-no/orche/channel"
+	"github.com/ezz-no/orche/config"
 	"github.com/ezz-no/orche/executor"
 	"github.com/ezz-no/orche/graph"
 	"github.com/ezz-no/orche/node"
 )
 
 var (
-	configFile = flag.String("f", "", "Path to workflow config file (YAML/JSON)")
+	configFile = flag.String("f", "", "Path to workflow config file (JSON)")
 	showHelp   = flag.Bool("h", false, "Show help message")
 )
 
@@ -28,82 +29,104 @@ func main() {
 
 	ctx := context.Background()
 	if err := run(ctx, *configFile); err != nil {
-		log.Fatal(err)
+		fmt.Fprintln(os.Stderr, formatError(err))
+		os.Exit(1)
 	}
 }
 
-func printHelp() {
-	fmt.Printf(`orche - Workflow Orchestration System
-
-Usage:
-  orche -f <config-file>    Run workflow from config file
-  orche -h                  Show this help message
-
-Examples:
-  orche -f workflow.yaml    Run workflow from YAML file
-  orche -f workflow.json    Run workflow from JSON file
-
-Config File Format (YAML):
-  nodes:
-    - id: fetch
-      type: process
-      binary: curl
-      args: ["-s", "http://example.com"]
-    - id: parse
-      type: func
-      handler: parseJSON
-  connections:
-    - from: fetch
-      to: parse
-
-`)
-}
-
 func run(ctx context.Context, configFile string) error {
-	fmt.Printf("Loading config from: %s\n", configFile)
+	cfg, err := config.Load(configFile)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
 
-	g := graph.NewGraphBuilder().
-		Node("generator", node.NewGeneratorNode("generator", "data-generator", func(ctx context.Context) (map[string][]byte, error) {
-			return map[string][]byte{
-				"data": []byte(`{"message": "hello world"}`),
-			}, nil
-		}, []node.Port{
-			{Name: "data", Type: "json", Required: true},
-		})).
-		Node("transform", node.NewFuncNode("transform", "data-transform", func(ctx context.Context, inputs map[string][]byte) (map[string][]byte, error) {
+	fmt.Printf("Workflow: %s\n", cfg.Name)
+	if cfg.Description != "" {
+		fmt.Printf("Description: %s\n", cfg.Description)
+	}
+
+	builder := graph.NewGraphBuilder()
+
+	handlerRegistry := map[string]func(context.Context, map[string][]byte) (map[string][]byte, error){
+		"transform": func(ctx context.Context, inputs map[string][]byte) (map[string][]byte, error) {
 			data := inputs["data"]
-			fmt.Printf("Transform got input: %s\n", string(data))
 			return map[string][]byte{
 				"result": append(data, []byte(" - transformed")...),
 			}, nil
-		}, []node.Port{
-			{Name: "data", Type: "json", Required: true},
-			{Name: "result", Type: "text", Required: true},
-		})).
-		Node("output", node.NewFuncNode("output", "stdout-output", func(ctx context.Context, inputs map[string][]byte) (map[string][]byte, error) {
+		},
+		"output": func(ctx context.Context, inputs map[string][]byte) (map[string][]byte, error) {
 			if result, ok := inputs["result"]; ok {
 				fmt.Printf("Output: %s\n", string(result))
-			} else {
-				fmt.Printf("Output: no data received, inputs: %v\n", inputs)
 			}
 			return nil, nil
-		}, []node.Port{
-			{Name: "result", Type: "text", Required: true},
-		})).
-		ConnectWithPorts("generator", "transform", "data", "data").
-		ConnectWithPorts("transform", "output", "result", "result").
-		Build()
+		},
+	}
+
+	for _, n := range cfg.Nodes {
+		switch n.Type {
+		case "generator":
+			var output map[string][]byte
+			if len(n.Output) > 0 {
+				output = make(map[string][]byte)
+				for _, o := range n.Output {
+					output[o.Name] = []byte(o.Value)
+				}
+			}
+			if output == nil {
+				output = map[string][]byte{"data": []byte("{}")}
+			}
+			builder.Node(n.ID, node.NewGeneratorNode(n.ID, n.ID, func(ctx context.Context) (map[string][]byte, error) {
+				return output, nil
+			}, []node.Port{{Name: "data", Type: "json", Required: true}}))
+
+		case "func":
+			if fn, ok := handlerRegistry[n.Handler]; ok {
+				builder.Node(n.ID, node.NewFuncNode(n.ID, n.Handler, fn, []node.Port{
+					{Name: "data", Type: "json", Required: true},
+					{Name: "result", Type: "text", Required: true},
+				}))
+			} else {
+				log.Printf("Warning: handler %s not found, skipping node %s", n.Handler, n.ID)
+			}
+
+		case "process":
+			builder.Node(n.ID, node.NewProcessNode(n.ID, n.ID, n.Binary, n.Args))
+
+		case "remote":
+			builder.Node(n.ID, node.NewRemoteNode(n.ID, n.ID, n.Endpoint, nil, nil))
+		}
+	}
+
+	for _, c := range cfg.Connections {
+		fromPort := c.FromPort
+		toPort := c.ToPort
+		if fromPort == "" {
+			fromPort = "default"
+		}
+		if toPort == "" {
+			toPort = "default"
+		}
+		builder.ConnectWithPorts(c.From, c.To, fromPort, toPort)
+	}
+
+	g := builder.Build()
 
 	chMgr := graph.NewChannelManager()
 	ch, _ := chMgr.GetOrCreate("default", channel.ChannelMemory)
 	chMgr.Register("default", ch)
 
 	exec := executor.NewExecutor(g, chMgr, nil)
-	exec.SetConfig(executor.ExecConfig{
-		Parallelism: 2,
-		RetryCount:  2,
-		ErrorMode:   "stop",
-	})
+	execCfg := executor.DefaultExecConfig
+	if cfg.Config.Parallelism > 0 {
+		execCfg.Parallelism = cfg.Config.Parallelism
+	}
+	if cfg.Config.RetryCount > 0 {
+		execCfg.RetryCount = cfg.Config.RetryCount
+	}
+	if cfg.Config.ErrorMode != "" {
+		execCfg.ErrorMode = cfg.Config.ErrorMode
+	}
+	exec.SetConfig(execCfg)
 
 	if err := exec.Execute(ctx); err != nil {
 		return fmt.Errorf("execution failed: %w", err)

@@ -1,0 +1,41 @@
+name: example-workflow
+description: Example workflow demonstrating orche capabilities
+
+nodes:
+  - id: generator
+    type: generator
+    output:
+      - name: data
+        type: json
+        value: '{"message": "hello from yaml"}'
+
+  - id: transform
+    type: func
+    handler: transform
+    input:
+      - name: data
+        from: generator
+        port: data
+
+  - id: output
+    type: func
+    handler: output
+    input:
+      - name: result
+        from: transform
+        port: result
+
+connections:
+  - from: generator
+    from_port: data
+    to: transform
+    to_port: data
+  - from: transform
+    from_port: result
+    to: output
+    to_port: result
+
+config:
+  parallelism: 2
+  retry_count: 3
+  error_mode: stop
