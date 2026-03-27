@@ -1,0 +1,30 @@
+{
+  "name": "extract-images",
+  "description": "Fetch webpage and extract all image URLs",
+  "nodes": [
+    {
+      "id": "fetch",
+      "type": "process",
+      "binary": "curl",
+      "args": ["-s", "--max-time", "5", "https://www.w3.org/"]
+    },
+    {
+      "id": "extract",
+      "type": "func",
+      "handler": "extractImages"
+    },
+    {
+      "id": "output",
+      "type": "func",
+      "handler": "printImages"
+    }
+  ],
+  "connections": [
+    {"from": "fetch", "from_port": "stdout", "to": "extract", "to_port": "html"},
+    {"from": "extract", "from_port": "images", "to": "output", "to_port": "images"}
+  ],
+  "config": {
+    "parallelism": 1,
+    "error_mode": "stop"
+  }
+}

@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"regexp"
 
 	"github.com/ezz-no/orche/channel"
 	"github.com/ezz-no/orche/config"
@@ -57,6 +59,44 @@ func run(ctx context.Context, configFile string) error {
 		"output": func(ctx context.Context, inputs map[string][]byte) (map[string][]byte, error) {
 			if result, ok := inputs["result"]; ok {
 				fmt.Printf("Output: %s\n", string(result))
+			}
+			return nil, nil
+		},
+		"extractImages": func(ctx context.Context, inputs map[string][]byte) (map[string][]byte, error) {
+			html := inputs["html"]
+			var urls []string
+
+			re := regexp.MustCompile(`<img[^>]+src=["']([^"']+)["']`)
+			matches := re.FindAllStringSubmatch(string(html), -1)
+			for _, match := range matches {
+				if len(match) > 1 {
+					urls = append(urls, match[1])
+				}
+			}
+
+			re2 := regexp.MustCompile(`url\(["']([^"']+)["']\)`)
+			matches2 := re2.FindAllStringSubmatch(string(html), -1)
+			for _, match := range matches2 {
+				if len(match) > 1 {
+					urls = append(urls, match[1])
+				}
+			}
+
+			if len(urls) == 0 {
+				return map[string][]byte{"images": []byte("[]")}, nil
+			}
+
+			out, _ := json.Marshal(urls)
+			return map[string][]byte{"images": out}, nil
+		},
+		"printImages": func(ctx context.Context, inputs map[string][]byte) (map[string][]byte, error) {
+			imagesData := inputs["images"]
+			var urls []string
+			json.Unmarshal(imagesData, &urls)
+
+			fmt.Printf("Found %d image(s):\n", len(urls))
+			for i, url := range urls {
+				fmt.Printf("  %d. %s\n", i+1, url)
 			}
 			return nil, nil
 		},
